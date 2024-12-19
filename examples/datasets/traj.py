@@ -120,7 +120,7 @@ def generate_ellipse_path_z(
             -1,
         )
 
-    theta = np.linspace(0, 2.0 * np.pi, n_frames + 1, endpoint=True)
+    theta = np.linspace(0, 0.5 * np.pi, n_frames + 1, endpoint=True)
     positions = get_positions(theta)
 
     # if const_speed:

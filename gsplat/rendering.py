@@ -242,6 +242,8 @@ def rasterization(
     assert render_mode in ["RGB", "D", "ED", "RGB+D", "RGB+ED"], render_mode
 
     def reshape_view(C: int, world_view: torch.Tensor, N_world: list) -> torch.Tensor:
+        # Q: What does this function do?
+        # A: It reshapes the view from [C * N, ...] to [C, N, ...] based on the number of Gaussians
         view_list = list(
             map(
                 lambda x: x.split(int(x.shape[0] / C), dim=0),
