@@ -12,8 +12,8 @@ import torch
 import torch.nn.functional as F
 import tqdm
 import tyro
-from examples.datasets.colmap import Dataset, Parser
-from examples.datasets.traj import (
+from datasets.colmap import Dataset, Parser
+from datasets.traj import (
     generate_interpolated_path,
     generate_ellipse_path_z,
     generate_spiral_path,
@@ -21,9 +21,9 @@ from examples.datasets.traj import (
 from torch import Tensor
 from torch.nn.parallel import DistributedDataParallel as DDP
 from typing_extensions import Literal, assert_never
-from examples.utils import AppearanceOptModule, CameraOptModule, knn, rgb_to_sh, set_random_seed
+from utils import AppearanceOptModule, CameraOptModule, knn, rgb_to_sh, set_random_seed
 from gsplat.distributed import cli
-from gsplat.custom_rendering import rasterization
+from gsplat.custom_rendering import rasterize_gaussian_images, rasterize_pixels
 from gsplat.strategy import DefaultStrategy, MCMCStrategy
 from gsplat.optimizers import SelectiveAdam
 
@@ -399,7 +399,8 @@ class Runner:
 
         rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
 
-        render_colors, render_alphas, meta = rasterization(
+        # render_colors, render_alphas, meta = rasterization(
+        meta = rasterize_gaussian_images(
             means=means,
             quats=quats,
             scales=scales,
@@ -422,6 +423,9 @@ class Runner:
             camera_model=self.cfg.camera_model,
             **kwargs,
         )
+
+        render_colors, render_alphas, meta = rasterize_pixels(meta)
+
         if masks is not None:
             render_colors[~masks] = 0
 
@@ -534,7 +538,9 @@ class Runner:
             far_plane = 10000000000.0
             render_mode = 'RGB+ED'
             rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
-            render_colors_new, render_alphas_new, meta = rasterization(
+
+
+            meta_2 = rasterize_gaussian_images(
                 means=recovered_means,
                 quats=recovered_quats,
                 scales=recovered_scales,
@@ -559,6 +565,10 @@ class Runner:
                 far_plane=far_plane,
                 render_mode=render_mode
             )
+            meta["means2d"] = meta_2["means2d"][0]
+            # print(f"radii.shape: {meta['radii'].shape}, conics.shape: {meta_2['conics'].shape}, colors.shape: {meta['colors'].shape}")
+
+            render_colors_new, render_alphas_new, _ = rasterize_pixels(meta)
 
 
 
@@ -633,5 +643,5 @@ if __name__ == "__main__":
     cfg.adjust_steps(cfg.steps_scaler)
     cfg.render_traj_path = "ellipse"
     # cfg.render_traj_path = "6dof"
-    cfg.ckpt = ["examples/results/garden/ckpts/ckpt_29999_rank0.pt"]
+    cfg.ckpt = ["results/garden/ckpts/ckpt_29999_rank0.pt"]
     cli(main, cfg, verbose=True)

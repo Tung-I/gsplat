@@ -23,7 +23,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from typing_extensions import Literal, assert_never
 from utils import AppearanceOptModule, CameraOptModule, knn, rgb_to_sh, set_random_seed
 from gsplat.distributed import cli
-from gsplat.rendering import rasterization
+from gsplat.custom_rendering import rasterize_gaussian_images, rasterize_pixels
 from gsplat.strategy import DefaultStrategy, MCMCStrategy
 from gsplat.optimizers import SelectiveAdam
 
@@ -399,7 +399,8 @@ class Runner:
 
         rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
 
-        render_colors, render_alphas, meta = rasterization(
+        # render_colors, render_alphas, meta = rasterization(
+        meta = rasterize_gaussian_images(
             means=means,
             quats=quats,
             scales=scales,
@@ -422,6 +423,9 @@ class Runner:
             camera_model=self.cfg.camera_model,
             **kwargs,
         )
+
+        render_colors, render_alphas, meta = rasterize_pixels(meta)
+
         if masks is not None:
             render_colors[~masks] = 0
 
@@ -534,7 +538,9 @@ class Runner:
             far_plane = 10000000000.0
             render_mode = 'RGB+ED'
             rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
-            render_colors_new, render_alphas_new, meta = rasterization(
+
+
+            meta = rasterize_gaussian_images(
                 means=recovered_means,
                 quats=recovered_quats,
                 scales=recovered_scales,
@@ -559,6 +565,8 @@ class Runner:
                 far_plane=far_plane,
                 render_mode=render_mode
             )
+
+            render_colors_new, render_alphas_new, meta = rasterize_pixels(meta)
 
 
 

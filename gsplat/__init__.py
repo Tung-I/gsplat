@@ -24,7 +24,8 @@ from .rendering import (
     rasterization_2dgs_inria_wrapper,
 )
 from .custom_rendering import (
-    rasterization,
+    rasterize_gaussian_images,
+    rasterize_pixels
 )
 from .strategy import DefaultStrategy, MCMCStrategy, Strategy
 from .version import __version__
