@@ -159,6 +159,7 @@ def rasterize_gaussian_images(
             compensations,
         ) = proj_results
         opacities = opacities[gaussian_ids]  # [nnz]
+        colors = colors[gaussian_ids] 
     else:
         # The results are with shape [C, N, ...]. Only the elements with radii > 0 are valid.
         radii, means2d, depths, conics, compensations = proj_results
@@ -190,30 +191,39 @@ def rasterize_gaussian_images(
 
     # Turn colors into [C, N, D] or [nnz, D] to pass into rasterize_to_pixels()
 
-    # Colors are SH coefficients, with shape [N, K, 3] or [C, N, K, 3]
-    camtoworlds = torch.inverse(viewmats)  # [C, 4, 4]
-    if packed:
-        dirs = means[gaussian_ids, :] - camtoworlds[camera_ids, :3, 3]  # [nnz, 3]
-        masks = radii > 0  # [nnz]
-        if colors.dim() == 3:
-            # Turn [N, K, 3] into [nnz, 3]
-            shs = colors[gaussian_ids, :, :]  # [nnz, K, 3]
+    if sh_degree is None:
+        # Colors are post-activation values, with shape [N, D] or [C, N, D]
+        if colors.dim() == 2:
+            # Turn [N, D] into [C, N, D]
+            colors = colors.expand(C, -1, -1)
         else:
-            # Turn [C, N, K, 3] into [nnz, 3]
-            shs = colors[camera_ids, gaussian_ids, :, :]  # [nnz, K, 3]
-        colors = spherical_harmonics(sh_degree, dirs, shs, masks=masks)  # [nnz, 3]
+            # colors is already [C, N, D]
+            pass
     else:
-        dirs = means[None, :, :] - camtoworlds[:, None, :3, 3]  # [C, N, 3]
-        masks = radii > 0  # [C, N]
-        if colors.dim() == 3:
-            # Turn [N, K, 3] into [C, N, K, 3]
-            shs = colors.expand(C, -1, -1, -1)  # [C, N, K, 3]
+        # Colors are SH coefficients, with shape [N, K, 3] or [C, N, K, 3]
+        camtoworlds = torch.inverse(viewmats)  # [C, 4, 4]
+        if packed:
+            dirs = means[gaussian_ids, :] - camtoworlds[camera_ids, :3, 3]  # [nnz, 3]
+            masks = radii > 0  # [nnz]
+            if colors.dim() == 3:
+                # Turn [N, K, 3] into [nnz, 3]
+                shs = colors[gaussian_ids, :, :]  # [nnz, K, 3]
+            else:
+                # Turn [C, N, K, 3] into [nnz, 3]
+                shs = colors[camera_ids, gaussian_ids, :, :]  # [nnz, K, 3]
+            colors = spherical_harmonics(sh_degree, dirs, shs, masks=masks)  # [nnz, 3]
         else:
-            # colors is already [C, N, K, 3]
-            shs = colors
-        colors = spherical_harmonics(sh_degree, dirs, shs, masks=masks)  # [C, N, 3]
-    # make it apple-to-apple with Inria's CUDA Backend.
-    colors = torch.clamp_min(colors + 0.5, 0.0)
+            dirs = means[None, :, :] - camtoworlds[:, None, :3, 3]  # [C, N, 3]
+            masks = radii > 0  # [C, N]
+            if colors.dim() == 3:
+                # Turn [N, K, 3] into [C, N, K, 3]
+                shs = colors.expand(C, -1, -1, -1)  # [C, N, K, 3]
+            else:
+                # colors is already [C, N, K, 3]
+                shs = colors
+            colors = spherical_harmonics(sh_degree, dirs, shs, masks=masks)  # [C, N, 3]
+        # make it apple-to-apple with Inria's CUDA Backend.
+        colors = torch.clamp_min(colors + 0.5, 0.0)
 
     meta.update(
         {
@@ -270,7 +280,6 @@ def rasterize_pixels(meta):
         camera_ids=camera_ids,
         gaussian_ids=gaussian_ids,
     )
-    # print("rank", world_rank, "Before isect_offset_encode")
     isect_offsets = isect_offset_encode(isect_ids, C, tile_width, tile_height)
 
     meta.update(

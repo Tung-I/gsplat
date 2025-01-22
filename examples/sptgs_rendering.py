@@ -15,9 +15,11 @@ from datasets.traj import (
     generate_ellipse_path_z,
     generate_spiral_path,
 )
-from gsplat.rendering import rasterization
+
+from gsplat.custom_rendering import rasterize_gaussian_images, rasterize_pixels
 from utils import knn, rgb_to_sh
-from sptgs import GaussianModel  # dynamic model implementation
+from sptgs import GaussianModel 
+from tile_processing import group_gaussian_attributes_by_tiles
 
 @dataclass
 class Config:
@@ -55,8 +57,6 @@ def create_splats(
     dist2_avg = (knn(points, 4)[:, 1:] ** 2).mean(dim=-1)  # [N,]
     dist_avg = torch.sqrt(dist2_avg)
     scales = torch.log(dist_avg * init_scale).unsqueeze(-1).repeat(1, 3)  # [N, 3]
-
-    # Distribute the GSs to different ranks (also works for single rank)
     points = points[world_rank::world_size]
     rgbs = rgbs[world_rank::world_size]
     scales = scales[world_rank::world_size]
@@ -66,7 +66,6 @@ def create_splats(
     opacities = torch.logit(torch.full((N,), init_opacity))  # [N,]
 
     params = [
-        # name, value, lr
         ("means", torch.nn.Parameter(points), 1.6e-4 * scene_scale),
         ("scales", torch.nn.Parameter(scales), 5e-3),
         ("quats", torch.nn.Parameter(quats), 1e-3),
@@ -123,8 +122,6 @@ class DynamicGSRenderer:
             world_rank=self.world_rank,
             world_size=self.world_size,
         )
-
-
         self.model = GaussianModel(sh_degree=cfg.sh_degree)
         ply_file = os.path.join(ckpt, "point_cloud.ply")
         if not os.path.exists(ply_file):
@@ -154,28 +151,18 @@ class DynamicGSRenderer:
         trbfdistanceoffset = timestamp * pointtimes - trbf_center
         trbfdistance =  trbfdistanceoffset / torch.exp(trbf_scale) 
         trbfoutput = trbfunction(trbfdistance)
+        self.model.trbfoutput = trbfoutput
+
         opacity = pointopacity * trbfoutput  # - 0.5
         opacity = opacity.squeeze(-1)
-        self.model.trbfoutput = trbfoutput
-        tforpoly = trbfdistanceoffset.detach()
 
-        # frame_t = torch.tensor(timestamp, device=self.device, dtype=means3D.dtype)
-        # frame_t = frame_t.view(1).expand(N)  # shape [N]
-        # offset = frame_t - trbf_center.view(-1)
-        # trbfdistance = offset / torch.exp(trbf_scale.view(-1))
-        # trbfoutput = trbfunction(trbfdistance)
-        # self.model.trbfoutput = trbfoutput.unsqueeze(-1)
-        # final opacities
-        # opacity = pointopacity * trbfoutput  # shape [N]
-        # motion offsets
-        # e.g. _motion[:,:3]*offset + ... etc.
-        # X(t) = X0 + ...
+        tforpoly = trbfdistanceoffset.detach()
         means3D = means3D +  self.model._motion[:, 0:3] * tforpoly + \
             self.model._motion[:, 3:6] * tforpoly * tforpoly + \
                 self.model._motion[:, 6:9] * tforpoly *tforpoly * tforpoly
-        # rotation
+        
         rotations = self.model.get_rotation(tforpoly)
-        # color
+
         color_precomp = self.model.get_features()
 
         # store them in a dictionary for rasterization
@@ -196,14 +183,13 @@ class DynamicGSRenderer:
     ):
         means = self.splats["means"]  # [N, 3]
         quats = self.splats["quats"]  # [N, 4]
-        # scales = torch.exp(self.splats["scales"])  # [N, 3]
-        # opacities = torch.sigmoid(self.splats["opacities"])  # [N,]
         scales = self.splats["scales"]
         opacities = self.splats["opacities"]
         colors = self.splats["colors"] 
 
         viewmats = torch.linalg.inv(camtoworlds).unsqueeze(0)
-        render_colors, render_alphas, info = rasterization(
+
+        meta = rasterize_gaussian_images(
             means=means,
             quats=quats,
             scales=scales,
@@ -216,18 +202,38 @@ class DynamicGSRenderer:
             camera_model=self.cfg.camera_model,
             sh_degree=None
         )
+        meta['colors'] = meta['colors'].squeeze(0)
+        render_colors, render_alphas, meta = rasterize_pixels(meta)
+    
+        tile_list = group_gaussian_attributes_by_tiles(meta)
+        tile_idxs_t = tile_list[0]
+        colors_tile = meta["colors"][tile_idxs_t]
+        raise Exception(f"colors_tile: {colors_tile.shape}")
+
+        # render_colors, render_alphas, info = rasterization(
+        #     means=means,
+        #     quats=quats,
+        #     scales=scales,
+        #     opacities=opacities,
+        #     colors=colors,
+        #     viewmats=viewmats,  # [C, 4, 4]
+        #     Ks=Ks,  # [C, 3, 3]
+        #     width=width,
+        #     height=height,
+        #     camera_model=self.cfg.camera_model,
+        #     sh_degree=None
+        # )
+
+
+
         render_colors = torch.clamp(render_colors, 0.0, 1.0)
         out = (render_colors[0].cpu().numpy() * 255).astype(np.uint8) 
         return out
 
     @torch.no_grad()
     def render_trajectory(self):
-        """
-        Renders a path specified in the config: "render_traj_path" = "interp", "ellipse", "spiral", etc.
-        """
-        # get some subset from parser
+
         camtoworlds_all = self.parser.camtoworlds  # e.g. shape (N,4,4)
-        # Example: take the first 10
         camtoworlds_all = camtoworlds_all[2:20]
 
         path_type = self.cfg.render_traj_path
