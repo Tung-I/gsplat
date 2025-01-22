@@ -1,0 +1,17 @@
+{
+    "data_dir": "/work/pi_rsitaram_umass_edu/tungi/datasets/n3d/flame_steak/colmap_0",
+    "data_factor": 1,
+    "normalize_world_space": true,
+    "test_every": 8,
+    "global_scale": 1.0,
+    "camera_model": "pinhole",
+    "result_dir": "results/flame_steak_static",
+    "render_traj_path": "interp",
+    "sh_degree": 3,
+    "near_plane": 0.01,
+    "far_plane": 10000.0
+  }
+
+  
+  python simple_rendering.py --config configs/rendering.json --ckpt results/flame_steak_frame000001/ --save_first_frame
+  python rendering.py default --data_dir $WORK/datasets/n3d/flame_steak/frame000001 --result_dir results/flame_steak_frame000001

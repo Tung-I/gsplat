@@ -118,7 +118,7 @@ class Parser:
 
         w2c_mats = np.stack(w2c_mats, axis=0)
 
-        # Convert extrinsics to camera-to-world.
+        # Convert extrinsics to camera-to-worldP
         camtoworlds = np.linalg.inv(w2c_mats)
 
         # Image names from COLMAP. No need for permuting the poses according to

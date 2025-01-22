@@ -1,0 +1,13 @@
+{
+  "data_dir": "/work/pi_rsitaram_umass_edu/tungi/datasets/n3d/flame_steak/colmap_0",
+  "data_factor": 1,
+  "normalize_world_space": false,
+  "test_every": 8,
+  "global_scale": 1.0,
+  "camera_model": "pinhole",
+  "result_dir": "results/sptgs_flame_steak_frame000001",
+  "render_traj_path": "interp",
+  "sh_degree": 3,
+  "near_plane": 0.01,
+  "far_plane": 10000.0
+}

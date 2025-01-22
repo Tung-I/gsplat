@@ -208,7 +208,7 @@ def generate_interpolated_path(
     n_interp: int,
     spline_degree: int = 5,
     smoothness: float = 0.03,
-    rot_weight: float = 0.1,
+    rot_weight: float = 0.05,
 ):
     """Creates a smooth spline path between input keyframe camera poses.
 
@@ -230,6 +230,9 @@ def generate_interpolated_path(
         pos = poses[:, :3, -1]
         lookat = poses[:, :3, -1] - dist * poses[:, :3, 2]
         up = poses[:, :3, -1] + dist * poses[:, :3, 1]
+
+        # # Adjust pos to the viewer come closer to the lookat point
+        # pos = pos + 0.5 * (lookat - pos)
         return np.stack([pos, lookat, up], 1)
 
     def points_to_poses(points):

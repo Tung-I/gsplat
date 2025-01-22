@@ -17,6 +17,7 @@ from datasets.traj import (
 )
 from gsplat.rendering import rasterization
 from utils import knn, rgb_to_sh
+from sptgs import GaussianModel  # dynamic model implementation
 
 @dataclass
 class Config:
@@ -88,7 +89,7 @@ def create_splats(
     splats = torch.nn.ParameterDict({n: v for n, v, _ in params}).to(device)
     return splats
 
-class GSSimpleRenderer:
+class DynamicGSRenderer:
     def __init__(self, cfg: dict, ckpt: str, save_video: bool, save_frame: bool, save_first_frame: bool):
         self.cfg = cfg
         self.ckpt = ckpt
@@ -122,12 +123,14 @@ class GSSimpleRenderer:
             world_rank=self.world_rank,
             world_size=self.world_size,
         )
-        file = f"{ckpt}/ckpts/ckpt_29999_rank0.pt"
-        ckpts = [
-            torch.load(file, map_location="cuda", weights_only=True)
-        ]
-        for k in self.splats.keys():
-            self.splats[k].data = torch.cat([ckpt["splats"][k] for ckpt in ckpts])
+
+
+        self.model = GaussianModel(sh_degree=cfg.sh_degree)
+        ply_file = os.path.join(ckpt, "point_cloud.ply")
+        if not os.path.exists(ply_file):
+            raise FileNotFoundError(f"Could not find {ply_file} for the dynamic model.")
+        self.model.load_ply(ply_file)
+        print(f"[DynamicGSRenderer] Loaded dynamic GS model with {self.model._xyz.shape[0]} points.")
 
         # 3) Output directories
         self.result_dir = cfg.result_dir
@@ -138,21 +141,67 @@ class GSSimpleRenderer:
         os.makedirs(self.render_dir, exist_ok=True)
 
     @torch.no_grad()
+    def load_frame(self, splats, timestamp: float):
+        means3D = self.model.get_xyz
+        pointopacity = self.model.get_opacity
+        trbfunction = lambda x: torch.exp(-x.pow(2))
+        trbf_center = self.model.get_trbfcenter
+        trbf_scale = self.model.get_trbfscale
+        N = means3D.shape[0]
+
+        # compute offset
+        pointtimes = torch.ones((N,1), dtype=means3D.dtype, requires_grad=False, device="cuda") + 0  
+        trbfdistanceoffset = timestamp * pointtimes - trbf_center
+        trbfdistance =  trbfdistanceoffset / torch.exp(trbf_scale) 
+        trbfoutput = trbfunction(trbfdistance)
+        opacity = pointopacity * trbfoutput  # - 0.5
+        opacity = opacity.squeeze(-1)
+        self.model.trbfoutput = trbfoutput
+        tforpoly = trbfdistanceoffset.detach()
+
+        # frame_t = torch.tensor(timestamp, device=self.device, dtype=means3D.dtype)
+        # frame_t = frame_t.view(1).expand(N)  # shape [N]
+        # offset = frame_t - trbf_center.view(-1)
+        # trbfdistance = offset / torch.exp(trbf_scale.view(-1))
+        # trbfoutput = trbfunction(trbfdistance)
+        # self.model.trbfoutput = trbfoutput.unsqueeze(-1)
+        # final opacities
+        # opacity = pointopacity * trbfoutput  # shape [N]
+        # motion offsets
+        # e.g. _motion[:,:3]*offset + ... etc.
+        # X(t) = X0 + ...
+        means3D = means3D +  self.model._motion[:, 0:3] * tforpoly + \
+            self.model._motion[:, 3:6] * tforpoly * tforpoly + \
+                self.model._motion[:, 6:9] * tforpoly *tforpoly * tforpoly
+        # rotation
+        rotations = self.model.get_rotation(tforpoly)
+        # color
+        color_precomp = self.model.get_features()
+
+        # store them in a dictionary for rasterization
+        splats["means"] = means3D
+        splats["quats"] = rotations
+        splats["scales"] = self.model.get_scaling  # raw log-scale
+        splats["opacities"] = opacity  # raw logit + time-based multiplier
+        splats["colors"] = color_precomp
+        return 
+
+    @torch.no_grad()
     def rasterize_splats(
         self,
         camtoworlds: torch.Tensor,
         Ks: torch.Tensor,
         width: int,
         height: int,
-    ) -> np.ndarray:
-         
+    ):
         means = self.splats["means"]  # [N, 3]
         quats = self.splats["quats"]  # [N, 4]
-        scales = torch.exp(self.splats["scales"])  # [N, 3]
-        opacities = torch.sigmoid(self.splats["opacities"])  # [N,]
-        colors = torch.cat([self.splats["sh0"], self.splats["shN"]], 1)  # [N, K, 3]
+        # scales = torch.exp(self.splats["scales"])  # [N, 3]
+        # opacities = torch.sigmoid(self.splats["opacities"])  # [N,]
+        scales = self.splats["scales"]
+        opacities = self.splats["opacities"]
+        colors = self.splats["colors"] 
 
-        # rasterization returns (B,H,W,3 or 4)
         viewmats = torch.linalg.inv(camtoworlds).unsqueeze(0)
         render_colors, render_alphas, info = rasterization(
             means=means,
@@ -160,14 +209,13 @@ class GSSimpleRenderer:
             scales=scales,
             opacities=opacities,
             colors=colors,
-            viewmats=viewmats,  # [B,4,4]
-            Ks=Ks,              # [B,3,3]
+            viewmats=viewmats,  # [C, 4, 4]
+            Ks=Ks,  # [C, 3, 3]
             width=width,
             height=height,
             camera_model=self.cfg.camera_model,
-            sh_degree=self.cfg.sh_degree
+            sh_degree=None
         )
-
         render_colors = torch.clamp(render_colors, 0.0, 1.0)
         out = (render_colors[0].cpu().numpy() * 255).astype(np.uint8) 
         return out
@@ -180,14 +228,14 @@ class GSSimpleRenderer:
         # get some subset from parser
         camtoworlds_all = self.parser.camtoworlds  # e.g. shape (N,4,4)
         # Example: take the first 10
-        camtoworlds_all = camtoworlds_all[:10]
+        camtoworlds_all = camtoworlds_all[2:20]
 
         path_type = self.cfg.render_traj_path
         if path_type == "interp":
             camtoworlds_all = generate_interpolated_path(camtoworlds_all, 20)
         elif path_type == "ellipse":
             avg_z = camtoworlds_all[:, 2, 3].mean()
-            camtoworlds_all = generate_ellipse_path_z(camtoworlds_all, height=avg_z)
+            camtoworlds_all = generate_ellipse_path_z(camtoworlds_all, height=avg_z-0.2)
         elif path_type == "spiral":
             bounds = self.parser.bounds * self.scene_scale
             scale_r = self.parser.extconf.get("spiral_radius_scale", 1.0)
@@ -201,6 +249,8 @@ class GSSimpleRenderer:
             np.array([[[0,0,0,1]]]*len(camtoworlds_all))  # add the final row
         ], axis=1)
         camtoworlds_all = torch.from_numpy(camtoworlds_all).float().to(self.device)
+        # Crop the trajectory
+        camtoworlds_all = camtoworlds_all[30:60]
 
         # get intrinsics
         K_np = list(self.parser.Ks_dict.values())[0]  # pick the first
@@ -217,10 +267,19 @@ class GSSimpleRenderer:
 
         # main loop
         frames_count = len(camtoworlds_all)
+        n_motion = 30
+        frames_per_motion = frames_count // n_motion
+        motion_indices = []
+        for i in range(n_motion):
+            motion_id = i / n_motion
+            for j in range (frames_per_motion):
+                motion_indices.append(motion_id)
+            
         for i in trange(frames_count, desc="Rendering trajectory"):
             c2w = camtoworlds_all[i]  
             Ks = K[None]
 
+            self.load_frame(self.splats, motion_indices[i])  # load the first frame
             out = self.rasterize_splats(c2w, Ks, width, height)
 
             # save frame if requested
@@ -262,7 +321,7 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config_json(args.config)
-    renderer = GSSimpleRenderer(
+    renderer = DynamicGSRenderer(
         cfg=cfg,
         ckpt=args.ckpt,
         save_video=args.save_video,

@@ -57,7 +57,7 @@ class Config:
     # Path to the Mip-NeRF 360 dataset
     data_dir: str = "data/360_v2/garden"
     # Downsample factor for the dataset
-    data_factor: int = 4
+    data_factor: int = 1
     # Directory to save results
     result_dir: str = "results/garden"
     # Every N images there is a test image
@@ -158,7 +158,7 @@ class Config:
     depth_lambda: float = 1e-2
 
     # Dump information to tensorboard every this steps
-    tb_every: int = 100
+    tb_every: int = 1000000000
     # Save training images to tensorboard
     tb_save_image: bool = False
 
