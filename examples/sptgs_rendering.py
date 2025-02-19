@@ -1,3 +1,5 @@
+# Code for rendering SpaceTimeGaussians
+
 import argparse
 import json
 import dataclasses
@@ -100,7 +102,7 @@ class DynamicGSRenderer:
         self.world_size = 1
         self.device='cuda'
 
-        # 1) Data parser for cameras
+        # Data parser for cameras
         self.parser = Parser(
             data_dir=cfg.data_dir,
             factor=cfg.data_factor,
@@ -108,9 +110,9 @@ class DynamicGSRenderer:
             test_every=cfg.test_every,
         )
         self.scene_scale = self.parser.scene_scale * cfg.global_scale
-        print(f"[GSSimpleRenderer] Scene scale: {self.scene_scale:.4f}")
+        print(f"Scene scale: {self.scene_scale:.4f}")
 
-        # 2) Load the GS model from checkpoint
+        # Create container for GS model
         self.splats = create_splats(
             self.parser,
             init_opacity=0.1,
@@ -122,14 +124,16 @@ class DynamicGSRenderer:
             world_rank=self.world_rank,
             world_size=self.world_size,
         )
+
+        # Load SPTGS pretrained model
         self.model = GaussianModel(sh_degree=cfg.sh_degree)
         ply_file = os.path.join(ckpt, "point_cloud.ply")
         if not os.path.exists(ply_file):
             raise FileNotFoundError(f"Could not find {ply_file} for the dynamic model.")
         self.model.load_ply(ply_file)
-        print(f"[DynamicGSRenderer] Loaded dynamic GS model with {self.model._xyz.shape[0]} points.")
+        print(f"[SPTGSRenderer] Loaded SPTGS model with {self.model._xyz.shape[0]} points.")
 
-        # 3) Output directories
+        # Create output directories
         self.result_dir = cfg.result_dir
         os.makedirs(self.result_dir, exist_ok=True)
         self.video_dir = os.path.join(self.result_dir, "videos")
@@ -139,6 +143,13 @@ class DynamicGSRenderer:
 
     @torch.no_grad()
     def load_frame(self, splats, timestamp: float):
+        """Parse the frame of SPTGS at a given timestamp.
+        Args:
+            splats: dict, splats to be updated
+            timestamp: float
+        Outputs:
+            None
+        """
         means3D = self.model.get_xyz
         pointopacity = self.model.get_opacity
         trbfunction = lambda x: torch.exp(-x.pow(2))
@@ -165,7 +176,6 @@ class DynamicGSRenderer:
 
         color_precomp = self.model.get_features()
 
-        # store them in a dictionary for rasterization
         splats["means"] = means3D
         splats["quats"] = rotations
         splats["scales"] = self.model.get_scaling  # raw log-scale
@@ -181,11 +191,20 @@ class DynamicGSRenderer:
         width: int,
         height: int,
     ):
+        """Rasterize the splats.
+        Args:
+            camtoworlds: [4,4]
+            Ks: [3,3]
+            width: int
+            height: int
+        Outputs:
+            out: np.ndarray, rendered image
+        """
         means = self.splats["means"]  # [N, 3]
         quats = self.splats["quats"]  # [N, 4]
-        scales = self.splats["scales"]
-        opacities = self.splats["opacities"]
-        colors = self.splats["colors"] 
+        scales = self.splats["scales"] # [N, 3]
+        opacities = self.splats["opacities"] # [N,]
+        colors = self.splats["colors"]  # [N, 3]
 
         viewmats = torch.linalg.inv(camtoworlds).unsqueeze(0)
 
@@ -205,26 +224,10 @@ class DynamicGSRenderer:
         meta['colors'] = meta['colors'].squeeze(0)
         render_colors, render_alphas, meta = rasterize_pixels(meta)
     
-        tile_list = group_gaussian_attributes_by_tiles(meta)
-        tile_idxs_t = tile_list[0]
-        colors_tile = meta["colors"][tile_idxs_t]
-        raise Exception(f"colors_tile: {colors_tile.shape}")
-
-        # render_colors, render_alphas, info = rasterization(
-        #     means=means,
-        #     quats=quats,
-        #     scales=scales,
-        #     opacities=opacities,
-        #     colors=colors,
-        #     viewmats=viewmats,  # [C, 4, 4]
-        #     Ks=Ks,  # [C, 3, 3]
-        #     width=width,
-        #     height=height,
-        #     camera_model=self.cfg.camera_model,
-        #     sh_degree=None
-        # )
-
-
+        # tile_list = group_gaussian_attributes_by_tiles(meta)
+        # tile_idxs_t = tile_list[0]
+        # colors_tile = meta["colors"][tile_idxs_t]
+        # raise Exception(f"colors_tile: {colors_tile.shape}")
 
         render_colors = torch.clamp(render_colors, 0.0, 1.0)
         out = (render_colors[0].cpu().numpy() * 255).astype(np.uint8) 
@@ -232,10 +235,11 @@ class DynamicGSRenderer:
 
     @torch.no_grad()
     def render_trajectory(self):
+        """Render the GS acc to some trajectories.
+        """
 
         camtoworlds_all = self.parser.camtoworlds  # e.g. shape (N,4,4)
         camtoworlds_all = camtoworlds_all[2:20]
-
         path_type = self.cfg.render_traj_path
         if path_type == "interp":
             camtoworlds_all = generate_interpolated_path(camtoworlds_all, 20)
@@ -249,29 +253,28 @@ class DynamicGSRenderer:
         else:
             raise ValueError(f"Unknown path type: {path_type}")
 
-        # Convert to (N,4,4)
-        camtoworlds_all = np.concatenate([
+        # Convert camtoworlds to (N,4,4)
+        camtoworlds_all = np.concatenate([  
             camtoworlds_all,
             np.array([[[0,0,0,1]]]*len(camtoworlds_all))  # add the final row
         ], axis=1)
         camtoworlds_all = torch.from_numpy(camtoworlds_all).float().to(self.device)
-        # Crop the trajectory
-        camtoworlds_all = camtoworlds_all[30:60]
+        camtoworlds_all = camtoworlds_all[30:60] # Crop the trajectory
 
-        # get intrinsics
+        # Get intrinsics
         K_np = list(self.parser.Ks_dict.values())[0]  # pick the first
         K = torch.from_numpy(K_np).float().to(self.device)
         width, height = list(self.parser.imsize_dict.values())[0]
 
-        # if saving video => create writer
+        # Create video writer
         if self.save_video:
             video_path = os.path.join(self.video_dir, f"traj_{path_type}.mp4")
             writer = imageio.get_writer(video_path, fps=30)
-            print(f"[GSSimpleRenderer] Writing video to: {video_path}")
+            print(f"[SPTGSRenderer] Writing video to: {video_path}")
         else:
             writer = None
 
-        # main loop
+        # Main loop
         frames_count = len(camtoworlds_all)
         n_motion = 30
         frames_per_motion = frames_count // n_motion
@@ -309,7 +312,7 @@ class DynamicGSRenderer:
         # close video
         if writer is not None:
             writer.close()
-            print("[GSSimpleRenderer] Video closed.")
+            print("[SPTGSRenderer] Video closed.")
 
 
 def main():
@@ -339,3 +342,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+

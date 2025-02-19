@@ -1,0 +1,87 @@
+# HEVC lossy encoding
+ffmpeg -y \
+  -hwaccel cuda \
+  -hwaccel_output_format cuda \
+  -framerate 30 \
+  -i packed_frames/packed_%04d.png \
+  -c:v hevc_nvenc \
+  -b:v 5M \
+  -maxrate 5M \
+  -bufsize 10M \
+  -pix_fmt yuv420p \
+  encoded_packed_hevc_5M.mp4
+
+  ffmpeg -y \
+  -hwaccel cuda \
+  -hwaccel_output_format cuda \
+  -framerate 30 \
+  -i packed_frames/packed_%04d.png \
+  -c:v hevc_nvenc \
+  -b:v 5M \
+  -maxrate 5M \
+  -bufsize 10M \
+  -pix_fmt yuv444p \
+  encoded_packed_hevc_5M.mp4
+
+  ffmpeg -y \
+  -hwaccel cuda \
+  -hwaccel_output_format cuda \
+  -framerate 30 \
+  -i packed_frames/packed_%04d.png \
+  -c:v hevc_nvenc \
+  -b:v 125M \
+  -maxrate 125M \
+  -bufsize 10M \
+  -pix_fmt yuv420p \
+  encoded_packed_hevc_125M.mp4
+
+
+# Lossless encoding
+ffmpeg -y \
+  -framerate 30 \
+  -i packed_frames/packed_%04d.png \
+  -c:v libx265 \
+  -preset veryslow \
+  -x265-params lossless=1 \
+  -pix_fmt yuv444p \
+  output_lossless_hevc_x265.mkv
+
+  ffmpeg -y \
+  -framerate 30 \
+  -i packed_frames/packed_%04d.png \
+  -c:v rawvideo \
+  -pix_fmt rgb24 \
+  rawvideo.avi
+
+# Lossy decoding
+  ffmpeg -y \
+  -i encoded_packed_hevc_5M.mp4 \
+  -pix_fmt rgb24 \
+  decoded_frames_5M/decoded_%04d.png
+
+  ffmpeg -y \
+  -i encoded_packed_hevc_125M.mp4 \
+  -pix_fmt rgb24 \
+  decoded_frames_125M/decoded_%04d.png
+
+  ffmpeg -y \
+  -framerate 30 \
+  -i packed_frames/packed_%04d.png \
+  -c:v ffv1 \
+  -pix_fmt rgb24 \
+  output_ffv1.mkv
+
+# Lossless decoding
+ffmpeg -y \
+  -i output_lossless_hevc_x265.mkv \
+  -pix_fmt rgb24 \
+  decoded_frames_lossless/decoded_%04d.png
+
+  ffmpeg -y \
+  -i output_ffv1.mkv \
+  -pix_fmt rgb24 \
+  decoded_frames_lossless_ffv1/decoded_%04d.png
+
+# Compare PNG pairs
+ffmpeg -i packed_frames/packed_0001.png -i decoded_frames_lossless/decoded_0001.png        -lavfi ssim="stats_file=ssim.log" -f null -
+ffmpeg -i packed_frames/packed_0001.png -i decoded_frames_lossless_ffv1/decoded_0001.png        -lavfi ssim="stats_file=ssim.log" -f null -
